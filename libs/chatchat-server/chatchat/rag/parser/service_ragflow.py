@@ -180,14 +180,33 @@ class RAGFlowDocumentParser(DocumentParser):
     def _fetch_chunks(
         self, client: httpx.Client, dataset_id: str, document_id: str
     ) -> list:
-        data = self._unwrap(
-            client.get(
-                f"/api/v1/datasets/{dataset_id}/documents/{document_id}/chunks",
-                params={"page_size": 1024},
-            ),
-            "拉取解析结果",
-        )
-        return (data or {}).get("chunks") or []
+        """拉取解析结果。
+
+        注意：RAGFlow 的 progress 到 1 时 chunk 可能尚未完全落库（v1.0.0-rc1 实测
+        存在数秒写入延迟），因此空结果时短暂重试，避免竞态导致误判为空文档。
+        """
+        deadline = time.monotonic() + 30.0
+        attempts = 0
+        while True:
+            attempts += 1
+            data = self._unwrap(
+                client.get(
+                    f"/api/v1/datasets/{dataset_id}/documents/{document_id}/chunks",
+                    params={"page_size": 1024},
+                ),
+                "拉取解析结果",
+            )
+            chunks = (data or {}).get("chunks") or []
+            if chunks:
+                logger.info(f"ragflow chunks fetched: {len(chunks)} (attempt {attempts})")
+                return chunks
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    f"ragflow chunks 为空（已重试 {attempts} 次 / 30s），"
+                    f"按 0 个 chunk 处理: {document_id}"
+                )
+                return []
+            time.sleep(2.0)
 
     @staticmethod
     def _to_document(chunk: dict, file_path: str) -> Document:
