@@ -16,7 +16,8 @@ from chatchat.server.agent.tools_factory.search_internet import search_engine
 from chatchat.server.api_server.api_schemas import OpenAIChatOutput
 from chatchat.server.chat.utils import History
 from chatchat.server.knowledge_base.kb_service.base import KBServiceFactory
-from chatchat.server.knowledge_base.kb_doc_api import search_docs, search_temp_docs
+from chatchat.server.knowledge_base.kb_doc_api import search_temp_docs
+from chatchat.rag import RAGQuery, get_rag_service
 from chatchat.server.knowledge_base.utils import format_reference
 from chatchat.server.utils import (wrap_done, get_ChatOpenAI, get_default_llm,
                                    BaseResponse, get_prompt_template, build_logger,
@@ -58,6 +59,10 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
                     description="使用的prompt模板名称(在prompt_settings.yaml中配置)"
                 ),
                 return_direct: bool = Body(False, description="直接返回检索结果，不送入 LLM"),
+                retrieval_strategy: Optional[Literal["vector", "hybrid_rrf", "hybrid_weighted"]] = Body(
+                    None,
+                    description="检索策略：默认 vector（原有行为不变）；hybrid_rrf/hybrid_weighted 启用 M05 混合检索（Vector+BM25 融合）",
+                ),
                 request: Request = None,
                 ):
     if mode == "local_kb":
@@ -76,13 +81,20 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
                 ok, msg = kb.check_embed_model()
                 if not ok:
                     raise ValueError(msg)
-                docs = await run_in_threadpool(search_docs,
-                                                query=query,
-                                                knowledge_base_name=kb_name,
-                                                top_k=top_k,
-                                                score_threshold=score_threshold,
-                                                file_name="",
-                                                metadata={})
+                rag_response = await run_in_threadpool(
+                    get_rag_service().retrieve,
+                    request=RAGQuery(
+                        query=query,
+                        knowledge_base=kb_name,
+                        top_k=top_k,
+                        score_threshold=score_threshold,
+                        retrieval_strategy=retrieval_strategy,
+                    ),
+                )
+                docs = [
+                    {"page_content": d.content, "metadata": d.metadata}
+                    for d in rag_response.documents
+                ]
                 source_documents = format_reference(kb_name, docs, api_address(is_public=True))
             elif mode == "temp_kb":
                 ok, msg = check_embed_model()

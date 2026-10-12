@@ -101,6 +101,34 @@ class BasicSettings(BaseFileSettings):
     OPEN_CROSS_DOMAIN: bool = False
     """API 是否开启跨域"""
 
+    GRAPH_ENGINE: str = "legacy"
+    """Agent 编排引擎灰度开关：legacy（默认，现有 AgentExecutor 循环）/ langgraph
+    （M06 LangGraph Runtime 实验路径）。仅供迁移期间灰度切换使用，改后需重启。"""
+
+    # RAGFlow 解析器开关（默认关闭，使用本地 document_loaders）
+    RAGFLOW_PARSER_ENABLED: bool = False
+    """M03 扩展：是否启用 RAGFlow DeepDoc 作为 Document Parser（默认 False，保持现状）"""
+
+    # RAGFlow 服务地址
+    RAGFLOW_BASE_URL: str = ""
+    """RAGFlow 服务地址，如 http://127.0.0.1:9380"""
+
+    # RAGFlow API Key
+    RAGFLOW_API_KEY: str = ""
+    """RAGFlow API Key（Authorization: Bearer ...）"""
+
+    # 解析轮询间隔（秒）
+    RAGFLOW_PARSE_POLL_INTERVAL: float = 2.0
+    """RAGFlow 解析进度轮询间隔（秒）"""
+
+    # 解析最长等待时间（秒）
+    RAGFLOW_PARSE_TIMEOUT: float = 600.0
+    """RAGFlow 单文件解析最长等待时间（秒），超时抛 ServiceError"""
+
+    # 用于解析的临时 dataset 名称前缀
+    RAGFLOW_TEMP_DATASET_PREFIX: str = "cc_temp_parse_"
+    """RAGFlow 临时 dataset 名称前缀（解析完成即删除，不留存数据）"""
+
     DEFAULT_BIND_HOST: str = "0.0.0.0" if sys.platform != "win32" else "127.0.0.1"
     """
     各服务器默认绑定host。如改为"0.0.0.0"需要修改下方所有XX_SERVER的host

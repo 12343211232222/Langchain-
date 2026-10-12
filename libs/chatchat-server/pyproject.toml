@@ -32,11 +32,14 @@ SQLAlchemy = "~2.0.25"
 faiss-cpu = "~1.7.4"
 jieba = "0.42.1"
 rank_bm25 = "0.2.2"
+# pinned: 兼容 langchain-core 0.1.x 的最后版本，禁止升级到 0.1+（会强升 langchain-core 0.2）
+langgraph = "0.0.45"
 openpyxl = "3.1.4"
 networkx = "3.1"
 opencv-python = "~4.10.0.84"
 PyMuPDF = "~1.23.16"
 rapidocr_onnxruntime = "~1.3.8"
+onnxruntime = "1.23.2"
 requests = "~2.32.3"
 pathlib = "~1.0.1"
 pyjwt = "~2.8.0"
@@ -228,7 +231,7 @@ build-backend = "poetry.core.masonry.api"
 #
 # https://github.com/tophat/syrupy
 # --snapshot-warn-unused    Prints a warning on unused snapshots rather than fail the test suite.
-addopts = "--strict-markers --strict-config --durations=5 --snapshot-warn-unused -svv"
+addopts = "--strict-markers --strict-config --durations=5 -svv"
 # Registering custom markers.
 # https://docs.pytest.org/en/7.1.x/example/markers.html#registering-markers
 markers = [

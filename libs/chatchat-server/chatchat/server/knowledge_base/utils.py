@@ -10,12 +10,9 @@ import chardet
 import langchain_community.document_loaders
 from langchain.docstore.document import Document
 from langchain.text_splitter import MarkdownHeaderTextSplitter, TextSplitter
-from langchain_community.document_loaders import JSONLoader, TextLoader
+from langchain_community.document_loaders import JSONLoader
 
 from chatchat.settings import Settings
-from chatchat.server.file_rag.text_splitter import (
-    zh_title_enhance as func_zh_title_enhance,
-)
 from chatchat.server.utils import run_in_process_pool, run_in_thread_pool
 from chatchat.utils import build_logger
 
@@ -334,16 +331,11 @@ class KnowledgeFile:
     def file2docs(self, refresh: bool = False):
         if self.docs is None or refresh:
             logger.info(f"{self.document_loader_name} used for {self.filepath}")
-            loader = get_loader(
-                loader_name=self.document_loader_name,
-                file_path=self.filepath,
-                loader_kwargs=self.loader_kwargs,
+            from chatchat.rag.parser.provider import get_document_parser
+
+            self.docs = get_document_parser().parse(
+                self.filepath, loader_kwargs=self.loader_kwargs
             )
-            if isinstance(loader, TextLoader):
-                loader.encoding = "utf8"
-                self.docs = loader.load()
-            else:
-                self.docs = loader.load()
         return self.docs
 
     def docs2texts(
@@ -358,25 +350,19 @@ class KnowledgeFile:
         docs = docs or self.file2docs(refresh=refresh)
         if not docs:
             return []
-        if self.ext not in [".csv"]:
-            if text_splitter is None:
-                text_splitter = make_text_splitter(
-                    splitter_name=self.text_splitter_name,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap,
-                )
-            if self.text_splitter_name == "MarkdownHeaderTextSplitter":
-                docs = text_splitter.split_text(docs[0].page_content)
-            else:
-                docs = text_splitter.split_documents(docs)
+        from chatchat.rag.chunk.provider import get_chunker
 
-        if not docs:
-            return []
-
-        print(f"文档切分示例：{docs[0]}")
-        if zh_title_enhance:
-            docs = func_zh_title_enhance(docs)
-        self.splited_docs = docs
+        self.splited_docs = get_chunker().chunk(
+            docs,
+            splitter_name=self.text_splitter_name,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            zh_title_enhance=zh_title_enhance,
+            text_splitter=text_splitter,
+            skip_split=(self.ext == ".csv"),
+        )
+        if self.splited_docs:
+            print(f"文档切分示例：{self.splited_docs[0]}")
         return self.splited_docs
 
     def file2text(
