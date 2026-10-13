@@ -80,5 +80,22 @@ main.add_command(startup_main, "start")
 main.add_command(kb_main, "kb")
 
 
+@main.command("ragflow-cleanup", help="清理 RAGFlow 侧残留的临时解析库（孤儿回收）")
+@click.option("--older-than", "older_than",
+              show_default=True,
+              default=3600,
+              type=int,
+              help="只清理创建时间超过该秒数的临时库。")
+def ragflow_cleanup(older_than: int = 3600):
+    """回收进程异常退出时残留的 cc_temp_parse_* 临时 dataset。
+
+    只删前缀匹配且超龄的库，绝不碰其他 dataset；可手动执行或挂定时任务。
+    """
+    from chatchat.rag.parser.service_ragflow import RAGFlowDocumentParser
+
+    count = RAGFlowDocumentParser().cleanup_orphan_datasets(older_than_seconds=older_than)
+    logger.success(f"孤儿临时库清理完成，共删除 {count} 个。")
+
+
 if __name__ == "__main__":
     main()

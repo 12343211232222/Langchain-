@@ -139,6 +139,17 @@ class TestGraphEngineSwitch:
 
 
 class TestProviders:
+    @pytest.fixture(autouse=True)
+    def isolate_switch(self, monkeypatch):
+        """隔离 yaml 中 RAGFLOW_PARSER_ENABLED 真实值对 provider 选择的影响。"""
+        from chatchat.settings import Settings
+        import chatchat.rag.parser.provider as provider_mod
+
+        monkeypatch.setattr(Settings.basic_settings, "RAGFLOW_PARSER_ENABLED", False)
+        monkeypatch.setattr(provider_mod, "_parser", None)
+        yield
+        monkeypatch.setattr(provider_mod, "_parser", None)
+
     def test_document_parser_provider(self):
         from chatchat.rag.parser import CurrentDocumentParser, get_document_parser
 

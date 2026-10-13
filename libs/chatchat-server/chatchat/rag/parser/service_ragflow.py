@@ -13,9 +13,18 @@ RAGFlow 在本任务中只扮演「把文件解析成结构化文本的函数」
 注意：RAGFlow 不同版本接口路径与字段有差异（老版单数
 ``/api/v1/dataset/...``，新版复数 ``/api/v1/datasets/...``），
 本实现按新版复数路径编写，对接实际部署版本时以官方文档为准。
+
+大批量场景健壮性（本模块增强）：
+- ``_semaphore`` 是**类级**信号量：限制同时进行的 RAGFlow 解析会话数。
+  之所以放在类级而非实例级，是因为 provider 单例可能被多线程共享，
+  实例级信号量无法限制全局并发；RAGFlow ingestor 通常只有 1 个 worker，
+  并发请求只会在其内部排队并集体撞上超时，所以闸门设在客户端侧。
+- ``cleanup_orphan_datasets``：进程被杀 / finally 未执行时残留的
+  ``cc_temp_parse_*`` 临时库，通过此方法按前缀 + create_time 兜底回收。
 """
 
 import os
+import threading
 import time
 import uuid
 from typing import List, Optional
@@ -34,6 +43,10 @@ from chatchat.settings import Settings
 
 logger = get_logger(__name__)
 
+# 轮询期间容忍的连续网络异常次数。轮询间隔很小（默认 0.5s），
+# 偶发网络抖动不应导致整个解析失败；连续超过该次数才判定为服务不可用。
+RAGFLOW_POLL_MAX_ERRORS = 3
+
 
 class RAGFlowDocumentParser(DocumentParser):
     """基于 RAGFlow DeepDoc 的 Document Parser（M03）。
@@ -41,6 +54,11 @@ class RAGFlowDocumentParser(DocumentParser):
     每次 parse：建临时 dataset → 上传 → 触发解析 → 轮询 → 拉取 chunks
     → 转 Document → finally 删除临时 dataset。
     """
+
+    # 类级并发闸门：所有实例共享，进程内全局生效。
+    # 容量在首次 parse 时按 RAGFLOW_MAX_CONCURRENT 惰性创建（创建后不可变）。
+    _semaphore: Optional[threading.Semaphore] = None
+    _semaphore_lock = threading.Lock()
 
     def __init__(
         self,
@@ -73,23 +91,40 @@ class RAGFlowDocumentParser(DocumentParser):
 
     # ---- 对外接口 ----
 
+    @classmethod
+    def _get_semaphore(cls) -> threading.Semaphore:
+        """惰性创建类级信号量（双检锁，线程安全）。"""
+        if cls._semaphore is None:
+            with cls._semaphore_lock:
+                if cls._semaphore is None:
+                    n = int(Settings.basic_settings.RAGFLOW_MAX_CONCURRENT)
+                    cls._semaphore = threading.Semaphore(max(1, n))
+        return cls._semaphore
+
     def parse(self, file_path: str, **kwargs) -> List[Document]:
-        """解析文件为 Document 列表（同步封装异步解析流程）。"""
+        """解析文件为 Document 列表（同步封装异步解析流程）。
+
+        信号量保护整个「建库→上传→解析→拉取→清理」流程；
+        先 acquire 再进入 finally 结构，保证 release 一定在
+        临时 dataset 清理之后执行。
+        """
         if not os.path.isfile(file_path):
             raise ResourceNotFoundError(f"文件不存在: {file_path}")
 
-        dataset_id: Optional[str] = None
-        with self._client() as client:
-            try:
-                dataset_id = self._create_temp_dataset(client)
-                document_id = self._upload_document(client, dataset_id, file_path)
-                self._trigger_parse(client, dataset_id, document_id)
-                self._wait_until_done(client, dataset_id, document_id)
-                chunks = self._fetch_chunks(client, dataset_id, document_id)
-                return [self._to_document(c, file_path) for c in chunks]
-            finally:
-                if dataset_id:
-                    self._delete_dataset(client, dataset_id)
+        semaphore = self._get_semaphore()
+        with semaphore:
+            dataset_id: Optional[str] = None
+            with self._client() as client:
+                try:
+                    dataset_id = self._create_temp_dataset(client)
+                    document_id = self._upload_document(client, dataset_id, file_path)
+                    self._trigger_parse(client, dataset_id, document_id)
+                    self._wait_until_done(client, dataset_id, document_id)
+                    chunks = self._fetch_chunks(client, dataset_id, document_id)
+                    return [self._to_document(c, file_path) for c in chunks]
+                finally:
+                    if dataset_id:
+                        self._delete_dataset(client, dataset_id)
 
     # ---- 内部步骤 ----
 
@@ -151,15 +186,43 @@ class RAGFlowDocumentParser(DocumentParser):
         )
 
     def _wait_until_done(self, client: httpx.Client, dataset_id: str, document_id: str) -> None:
+        """轮询解析进度，直到 DONE / 失败 / 超时。
+
+        容错设计：轮询间隔调小后（默认 0.5s）轮询次数大幅增加，偶发的网络抖动
+        不应让整个解析前功尽弃。因此对单次轮询的网络异常（``httpx.TransportError``）
+        容忍连续若干次，超过阈值才向上抛；而业务失败（run=FAIL/CANCEL）仍立即抛。
+        """
         deadline = time.monotonic() + self.parse_timeout
+        consecutive_errors = 0
+        last_error: Optional[Exception] = None
         while True:
-            data = self._unwrap(
-                client.get(
-                    f"/api/v1/datasets/{dataset_id}/documents",
-                    params={"id": document_id},
-                ),
-                "轮询解析进度",
-            )
+            try:
+                data = self._unwrap(
+                    client.get(
+                        f"/api/v1/datasets/{dataset_id}/documents",
+                        params={"id": document_id},
+                    ),
+                    "轮询解析进度",
+                )
+                consecutive_errors = 0  # 本轮成功，重置容错计数
+            except httpx.TransportError as e:
+                # 网络层抖动：容忍连续 N 次，期间继续按 deadline 重试
+                consecutive_errors += 1
+                last_error = e
+                if consecutive_errors >= RAGFLOW_POLL_MAX_ERRORS:
+                    raise ServiceError(
+                        f"RAGFlow 轮询连续失败 {consecutive_errors} 次"
+                        f"（已等待 {self.parse_timeout - (deadline - time.monotonic()):.1f}s）: {e}"
+                    ) from e
+                logger.warning(
+                    f"ragflow 轮询异常（第 {consecutive_errors}/{RAGFLOW_POLL_MAX_ERRORS} 次，"
+                    f"将继续重试）: {e}"
+                )
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(self.poll_interval)
+                continue
+
             docs = (data or {}).get("docs") or []
             doc = next((d for d in docs if d.get("id") == document_id), docs[0] if docs else None)
             if doc is not None:
@@ -172,10 +235,16 @@ class RAGFlowDocumentParser(DocumentParser):
                         f"RAGFlow 解析失败（run={run}）: {doc.get('progress_msg')}"
                     )
             if time.monotonic() >= deadline:
-                raise ServiceError(
-                    f"RAGFlow 解析超时（>{self.parse_timeout}s）: {document_id}"
-                )
+                break
             time.sleep(self.poll_interval)
+
+        # 超时退出：错误信息带「已等待时长 / 配置上限」，便于排查
+        waited = self.parse_timeout - (deadline - time.monotonic())
+        detail = f"，最后一次轮询异常: {last_error}" if last_error else ""
+        raise ServiceError(
+            f"RAGFlow 解析超时（已等待 {waited:.1f}s / 上限 {self.parse_timeout}s）"
+            f": {document_id}{detail}"
+        )
 
     def _fetch_chunks(
         self, client: httpx.Client, dataset_id: str, document_id: str
@@ -227,3 +296,56 @@ class RAGFlowDocumentParser(DocumentParser):
             logger.info(f"ragflow temp dataset deleted: {dataset_id}")
         except Exception as e:
             logger.error(f"ragflow 临时 dataset 清理失败 {dataset_id}: {e}")
+
+    # ---- 孤儿临时库兜底清理 ----
+
+    def cleanup_orphan_datasets(self, older_than_seconds: int = 3600) -> int:
+        """回收异常残留的临时 dataset（进程被杀 / finally 未执行的场景）。
+
+        安全约束：只删除 name 以 ``self.temp_dataset_prefix`` 开头且超龄的库，
+        绝不碰其他 dataset。返回清理数量。
+
+        时间字段说明（v1.0.0-rc1 实测）：列表接口 ``GET /api/v1/datasets``
+        **不返回 ``create_time``**（该字段仅在创建响应里有），只返回
+        ``update_time``（毫秒时间戳）。临时库的寿命极短（建库即解析即删除），
+        因此 ``update_time ≈ create_time``，用前者作兜底判断是安全的。
+        两个字段都缺失时才退化为「只报告不删除」。
+        """
+        with self._client() as client:
+            data = self._unwrap(
+                client.get("/api/v1/datasets", params={"page_size": 1024}),
+                "列出 datasets",
+            )
+            datasets = data if isinstance(data, list) else (data or {}).get("datasets") or []
+            orphans = []
+            now_ms = int(time.time() * 1000)
+            missing_time = 0
+            for ds in datasets:
+                name = ds.get("name") or ""
+                if not name.startswith(self.temp_dataset_prefix):
+                    continue  # 安全红线：非本模块创建的库一律跳过
+                # 优先 create_time，回退 update_time（rc1 列表接口只有后者）
+                ts = ds.get("create_time")
+                if ts is None:
+                    ts = ds.get("update_time")
+                if ts is None:
+                    missing_time += 1
+                    continue
+                age_seconds = (now_ms - int(ts)) / 1000.0
+                if age_seconds >= older_than_seconds:
+                    orphans.append(ds["id"])
+            if missing_time:
+                logger.warning(
+                    f"ragflow {missing_time} 个临时库缺少 create_time/update_time，"
+                    "只报告不删除（请升级 RAGFlow 或手工核对）"
+                )
+            if not orphans:
+                logger.info("ragflow 无超龄临时库需要清理")
+                return 0
+            self._unwrap(
+                client.request("DELETE", "/api/v1/datasets", json={"ids": orphans}),
+                "清理孤儿临时库",
+            )
+            for oid in orphans:
+                logger.info(f"ragflow orphan dataset cleaned: {oid}")
+            return len(orphans)

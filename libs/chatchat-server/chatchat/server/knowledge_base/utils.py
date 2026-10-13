@@ -330,10 +330,11 @@ class KnowledgeFile:
 
     def file2docs(self, refresh: bool = False):
         if self.docs is None or refresh:
-            logger.info(f"{self.document_loader_name} used for {self.filepath}")
             from chatchat.rag.parser.provider import get_document_parser
 
-            self.docs = get_document_parser().parse(
+            parser = get_document_parser()
+            logger.info(f"{type(parser).__name__} used for {self.filepath}")
+            self.docs = parser.parse(
                 self.filepath, loader_kwargs=self.loader_kwargs
             )
         return self.docs

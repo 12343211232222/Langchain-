@@ -118,16 +118,29 @@ class BasicSettings(BaseFileSettings):
     """RAGFlow API Key（Authorization: Bearer ...）"""
 
     # 解析轮询间隔（秒）
-    RAGFLOW_PARSE_POLL_INTERVAL: float = 2.0
-    """RAGFlow 解析进度轮询间隔（秒）"""
+    RAGFLOW_PARSE_POLL_INTERVAL: float = 0.5
+    """RAGFlow 解析进度轮询间隔（秒）。
+
+    本地部署轮询开销可忽略，调小可减少「解析已完成但仍空转等待」的时间；
+    大批量场景建议 0.5。默认 0.5（原为 2.0）。
+    """
 
     # 解析最长等待时间（秒）
-    RAGFLOW_PARSE_TIMEOUT: float = 600.0
-    """RAGFlow 单文件解析最长等待时间（秒），超时抛 ServiceError"""
+    RAGFLOW_PARSE_TIMEOUT: float = 1800.0
+    """RAGFlow 单文件解析最长等待时间（秒），超时抛 ServiceError。
+
+    大 PDF（几百页）DeepDoc 解析可能超过 10 分钟，放宽可避免误判为失败
+    并残留临时库；大批量/大文件建议 1800。默认 1800（原为 600）。
+    """
 
     # 用于解析的临时 dataset 名称前缀
     RAGFLOW_TEMP_DATASET_PREFIX: str = "cc_temp_parse_"
     """RAGFlow 临时 dataset 名称前缀（解析完成即删除，不留存数据）"""
+
+    # 同时进行的 RAGFlow 解析会话数上限（进程级信号量）
+    RAGFLOW_MAX_CONCURRENT: int = 2
+    """RAGFlow 解析并发上限。RAGFlow ingestor 通常单 worker，并发请求只会在
+    其内部排队并集体撞上超时，故在客户端侧限流；大批量上传建议保持 1~2。"""
 
     DEFAULT_BIND_HOST: str = "0.0.0.0" if sys.platform != "win32" else "127.0.0.1"
     """
